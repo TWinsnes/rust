@@ -421,7 +421,14 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
             ast::ExprIndex(ref l, ref r) |
             ast::ExprBinary(_, ref l, ref r) if self.is_method_call(expr) => {
-                self.call(expr, pred, &**l, Some(&**r).move_iter())
+                self.call(expr, pred, &**l, Some(&**r).into_iter())
+            }
+
+            ast::ExprSlice(ref base, ref start, ref end, _) => {
+                self.call(expr,
+                          pred,
+                          &**base,
+                          start.iter().chain(end.iter()).map(|x| &**x))
             }
 
             ast::ExprUnary(_, ref e) if self.is_method_call(expr) => {
@@ -461,7 +468,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             ast::ExprParen(ref e) |
             ast::ExprField(ref e, _, _) |
             ast::ExprTupField(ref e, _, _) => {
-                self.straightline(expr, pred, Some(&**e).move_iter())
+                self.straightline(expr, pred, Some(&**e).into_iter())
             }
 
             ast::ExprInlineAsm(ref inline_asm) => {

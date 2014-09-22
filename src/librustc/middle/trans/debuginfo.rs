@@ -664,7 +664,7 @@ pub struct FunctionDebugContext {
 }
 
 enum FunctionDebugContextRepr {
-    FunctionDebugContext(Box<FunctionDebugContextData>),
+    DebugInfo(Box<FunctionDebugContextData>),
     DebugInfoDisabled,
     FunctionWithoutDebugInfo,
 }
@@ -675,7 +675,7 @@ impl FunctionDebugContext {
                    span: Span)
                    -> &'a FunctionDebugContextData {
         match self.repr {
-            FunctionDebugContext(box ref data) => data,
+            DebugInfo(box ref data) => data,
             DebugInfoDisabled => {
                 cx.sess().span_bug(span,
                                    FunctionDebugContext::debuginfo_disabled_message());
@@ -738,12 +738,6 @@ pub fn finalize(cx: &CrateContext) {
             cx.sess().targ_cfg.os == abi::OsiOS {
             "Dwarf Version".with_c_str(
                 |s| llvm::LLVMRustAddModuleFlag(cx.llmod(), s, 2));
-        } else if cx.sess().targ_cfg.os == abi::OsLinux {
-            // FIXME(#13611) this is a kludge fix because the Linux bots have
-            //               gdb 7.4 which doesn't understand dwarf4, we should
-            //               do something more graceful here.
-            "Dwarf Version".with_c_str(
-                |s| llvm::LLVMRustAddModuleFlag(cx.llmod(), s, 3));
         }
 
         // Prevent bitcode readers from deleting the debug info.
@@ -822,7 +816,7 @@ pub fn create_global_var_metadata(cx: &CrateContext,
                                                         type_metadata,
                                                         is_local_to_unit,
                                                         global,
-                                                        ptr::mut_null());
+                                                        ptr::null_mut());
             }
         })
     });
@@ -1005,16 +999,16 @@ pub fn create_argument_metadata(bcx: Block, arg: &ast::Arg) {
     let scope_metadata = bcx.fcx.debug_context.get_ref(cx, arg.pat.span).fn_metadata;
 
     pat_util::pat_bindings(def_map, &*arg.pat, |_, node_id, span, path1| {
-        let llarg = match bcx.fcx.llargs.borrow().find_copy(&node_id) {
+        let llarg = match bcx.fcx.lllocals.borrow().find_copy(&node_id) {
             Some(v) => v,
             None => {
                 bcx.sess().span_bug(span,
-                    format!("no entry in llargs table for {:?}",
+                    format!("no entry in lllocals table for {:?}",
                             node_id).as_slice());
             }
         };
 
-        if unsafe { llvm::LLVMIsAAllocaInst(llarg.val) } == ptr::mut_null() {
+        if unsafe { llvm::LLVMIsAAllocaInst(llarg.val) } == ptr::null_mut() {
             cx.sess().span_bug(span, "debuginfo::create_argument_metadata() - \
                                     Referenced variable location is not an alloca!");
         }
@@ -1050,7 +1044,7 @@ pub fn set_source_location(fcx: &FunctionContext,
             set_debug_location(fcx.ccx, UnknownLocation);
             return;
         }
-        FunctionDebugContext(box ref function_debug_context) => {
+        DebugInfo(box ref function_debug_context) => {
             let cx = fcx.ccx;
 
             debug!("set_source_location: {}", cx.sess().codemap().span_to_string(span));
@@ -1088,7 +1082,7 @@ pub fn clear_source_location(fcx: &FunctionContext) {
 /// first real statement/expression of the function is translated.
 pub fn start_emitting_source_locations(fcx: &FunctionContext) {
     match fcx.debug_context.repr {
-        FunctionDebugContext(box ref data) => {
+        DebugInfo(box ref data) => {
             data.source_locations_enabled.set(true)
         },
         _ => { /* safe to ignore */ }
@@ -1152,6 +1146,11 @@ pub fn create_function_debug_context(cx: &CrateContext,
                      method.pe_body(),
                      method.span,
                      true)
+                }
+                ast::TypeImplItem(ref typedef) => {
+                    cx.sess().span_bug(typedef.span,
+                                       "create_function_debug_context() \
+                                        called on associated type?!")
                 }
             }
         }
@@ -1273,7 +1272,7 @@ pub fn create_function_debug_context(cx: &CrateContext,
                     cx.sess().opts.optimize != config::No,
                     llfn,
                     template_parameters,
-                    ptr::mut_null())
+                    ptr::null_mut())
             }
         })
     });
@@ -1292,7 +1291,7 @@ pub fn create_function_debug_context(cx: &CrateContext,
                        fn_metadata,
                        &mut *fn_debug_context.scope_map.borrow_mut());
 
-    return FunctionDebugContext { repr: FunctionDebugContext(fn_debug_context) };
+    return FunctionDebugContext { repr: DebugInfo(fn_debug_context) };
 
     fn get_function_signature(cx: &CrateContext,
                               fn_ast_id: ast::NodeId,
@@ -1308,7 +1307,7 @@ pub fn create_function_debug_context(cx: &CrateContext,
         // Return type -- llvm::DIBuilder wants this at index 0
         match fn_decl.output.node {
             ast::TyNil => {
-                signature.push(ptr::mut_null());
+                signature.push(ptr::null_mut());
             }
             _ => {
                 assert_type_for_node_id(cx, fn_ast_id, error_span);
@@ -1382,7 +1381,7 @@ pub fn create_function_debug_context(cx: &CrateContext,
                             file_metadata,
                             name,
                             actual_self_type_metadata,
-                            ptr::mut_null(),
+                            ptr::null_mut(),
                             0,
                             0)
                     }
@@ -1417,7 +1416,7 @@ pub fn create_function_debug_context(cx: &CrateContext,
                             file_metadata,
                             name,
                             actual_type_metadata,
-                            ptr::mut_null(),
+                            ptr::null_mut(),
                             0,
                             0)
                     }
@@ -2410,7 +2409,7 @@ fn prepare_enum_metadata(cx: &CrateContext,
                 bytes_to_bits(enum_type_size),
                 bytes_to_bits(enum_type_align),
                 0, // Flags
-                ptr::mut_null(),
+                ptr::null_mut(),
                 0, // RuntimeLang
                 unique_type_id_str)
             }
@@ -2581,10 +2580,10 @@ fn create_struct_stub(cx: &CrateContext,
                     bytes_to_bits(struct_size),
                     bytes_to_bits(struct_align),
                     0,
-                    ptr::mut_null(),
+                    ptr::null_mut(),
                     empty_array,
                     0,
-                    ptr::mut_null(),
+                    ptr::null_mut(),
                     unique_type_id)
             })
         })
@@ -2798,7 +2797,7 @@ fn subroutine_type_metadata(cx: &CrateContext,
 
     // return type
     signature_metadata.push(match ty::get(signature.output).sty {
-        ty::ty_nil => ptr::mut_null(),
+        ty::ty_nil => ptr::null_mut(),
         _ => type_metadata(cx, signature.output, span)
     });
 
@@ -3074,7 +3073,7 @@ fn set_debug_location(cx: &CrateContext, debug_location: DebugLocation) {
             let col = UNKNOWN_COLUMN_NUMBER;
             debug!("setting debug location to {} {}", line, col);
             let elements = [C_i32(cx, line as i32), C_i32(cx, col as i32),
-                            scope, ptr::mut_null()];
+                            scope, ptr::null_mut()];
             unsafe {
                 metadata_node = llvm::LLVMMDNodeInContext(debug_context(cx).llcontext,
                                                           elements.as_ptr(),
@@ -3083,7 +3082,7 @@ fn set_debug_location(cx: &CrateContext, debug_location: DebugLocation) {
         }
         UnknownLocation => {
             debug!("clearing debug location ");
-            metadata_node = ptr::mut_null();
+            metadata_node = ptr::null_mut();
         }
     };
 
@@ -3135,7 +3134,7 @@ fn DIB(cx: &CrateContext) -> DIBuilderRef {
 
 fn fn_should_be_ignored(fcx: &FunctionContext) -> bool {
     match fcx.debug_context.repr {
-        FunctionDebugContext(_) => false,
+        DebugInfo(_) => false,
         _ => true
     }
 }
@@ -3478,6 +3477,12 @@ fn populate_scope_map(cx: &CrateContext,
             ast::ExprBinary(_, ref lhs, ref rhs)    => {
                 walk_expr(cx, &**lhs, scope_stack, scope_map);
                 walk_expr(cx, &**rhs, scope_stack, scope_map);
+            }
+
+            ast::ExprSlice(ref base, ref start, ref end, _) => {
+                walk_expr(cx, &**base, scope_stack, scope_map);
+                start.as_ref().map(|x| walk_expr(cx, &**x, scope_stack, scope_map));
+                end.as_ref().map(|x| walk_expr(cx, &**x, scope_stack, scope_map));
             }
 
             ast::ExprVec(ref init_expressions) |
@@ -3953,7 +3958,7 @@ fn namespace_for_item(cx: &CrateContext, def_id: ast::DefId) -> Rc<NamespaceTree
         } else {
             None
         };
-        let mut path = krate.move_iter().chain(path).peekable();
+        let mut path = krate.into_iter().chain(path).peekable();
 
         let mut current_key = Vec::new();
         let mut parent_node: Option<Rc<NamespaceTreeNode>> = None;
@@ -3981,7 +3986,7 @@ fn namespace_for_item(cx: &CrateContext, def_id: ast::DefId) -> Rc<NamespaceTree
                     // create and insert
                     let parent_scope = match parent_node {
                         Some(ref node) => node.scope,
-                        None => ptr::mut_null()
+                        None => ptr::null_mut()
                     };
                     let namespace_name = token::get_name(name);
                     let scope = namespace_name.get().with_c_str(|namespace_name| {
@@ -3991,7 +3996,7 @@ fn namespace_for_item(cx: &CrateContext, def_id: ast::DefId) -> Rc<NamespaceTree
                                 parent_scope,
                                 namespace_name,
                                 // cannot reconstruct file ...
-                                ptr::mut_null(),
+                                ptr::null_mut(),
                                 // ... or line information, but that's not so important.
                                 0)
                         }

@@ -13,7 +13,7 @@
 use lint::{LintPassObject, LintId, Lint};
 
 use syntax::ext::base::{SyntaxExtension, NamedSyntaxExtension, NormalTT};
-use syntax::ext::base::{IdentTT, LetSyntaxTT, ItemDecorator, ItemModifier};
+use syntax::ext::base::{IdentTT, LetSyntaxTT, Decorator, Modifier};
 use syntax::ext::base::{MacroExpanderFn};
 use syntax::codemap::Span;
 use syntax::parse::token;
@@ -61,8 +61,8 @@ impl Registry {
         self.syntax_exts.push((name, match extension {
             NormalTT(ext, _) => NormalTT(ext, Some(self.krate_span)),
             IdentTT(ext, _) => IdentTT(ext, Some(self.krate_span)),
-            ItemDecorator(ext) => ItemDecorator(ext),
-            ItemModifier(ext) => ItemModifier(ext),
+            Decorator(ext) => Decorator(ext),
+            Modifier(ext) => Modifier(ext),
             // there's probably a nicer way to signal this:
             LetSyntaxTT(_, _) => fail!("can't register a new LetSyntax!"),
         }));
@@ -84,6 +84,6 @@ impl Registry {
 
     /// Register a lint group.
     pub fn register_lint_group(&mut self, name: &'static str, to: Vec<&'static Lint>) {
-        self.lint_groups.insert(name, to.move_iter().map(|x| LintId::of(x)).collect());
+        self.lint_groups.insert(name, to.into_iter().map(|x| LintId::of(x)).collect());
     }
 }

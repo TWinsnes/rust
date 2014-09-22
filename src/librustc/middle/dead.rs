@@ -101,22 +101,25 @@ impl<'a, 'tcx> MarkSymbolVisitor<'a, 'tcx> {
                         }
                     }
                     typeck::MethodStaticUnboxedClosure(_) => {}
-                    typeck::MethodParam(typeck::MethodParam {
-                        trait_id: trait_id,
+                    typeck::MethodTypeParam(typeck::MethodParam {
+                        trait_ref: ref trait_ref,
                         method_num: index,
                         ..
-                    })
-                    | typeck::MethodObject(typeck::MethodObject {
-                        trait_id: trait_id,
+                    }) |
+                    typeck::MethodTraitObject(typeck::MethodObject {
+                        trait_ref: ref trait_ref,
                         method_num: index,
                         ..
                     }) => {
                         let trait_item = ty::trait_item(self.tcx,
-                                                        trait_id,
+                                                        trait_ref.def_id,
                                                         index);
                         match trait_item {
                             ty::MethodTraitItem(method) => {
                                 self.check_def_id(method.def_id);
+                            }
+                            ty::TypeTraitItem(typedef) => {
+                                self.check_def_id(typedef.def_id);
                             }
                         }
                     }
@@ -226,6 +229,7 @@ impl<'a, 'tcx> MarkSymbolVisitor<'a, 'tcx> {
                     ast::MethodImplItem(ref method) => {
                         visit::walk_block(self, method.pe_body());
                     }
+                    ast::TypeImplItem(_) => {}
                 }
             }
             ast_map::NodeForeignItem(foreign_item) => {
@@ -302,7 +306,7 @@ fn has_allow_dead_code_or_lang_attr(attrs: &[ast::Attribute]) -> bool {
     }
 
     let dead_code = lint::builtin::DEAD_CODE.name_lower();
-    for attr in lint::gather_attrs(attrs).move_iter() {
+    for attr in lint::gather_attrs(attrs).into_iter() {
         match attr {
             Ok((ref name, lint::Allow, _))
                 if name.get() == dead_code.as_slice() => return true,
@@ -341,6 +345,7 @@ impl<'v> Visitor<'v> for LifeSeeder {
                         ast::MethodImplItem(ref method) => {
                             self.worklist.push(method.id);
                         }
+                        ast::TypeImplItem(_) => {}
                     }
                 }
             }
@@ -470,7 +475,7 @@ impl<'a, 'tcx> DeadVisitor<'a, 'tcx> {
         match self.tcx.inherent_impls.borrow().find(&local_def(id)) {
             None => (),
             Some(impl_list) => {
-                for impl_did in impl_list.borrow().iter() {
+                for impl_did in impl_list.iter() {
                     for item_did in impl_items.get(impl_did).iter() {
                         if self.live_symbols.contains(&item_did.def_id()
                                                                .node) {
@@ -544,7 +549,8 @@ impl<'a, 'tcx, 'v> Visitor<'v> for DeadVisitor<'a, 'tcx> {
             ast::ProvidedMethod(ref method) => {
                 visit::walk_block(self, &*method.pe_body())
             }
-            ast::RequiredMethod(_) => ()
+            ast::RequiredMethod(_) => {}
+            ast::TypeTraitItem(_) => {}
         }
     }
 }

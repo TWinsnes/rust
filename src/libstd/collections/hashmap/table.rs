@@ -674,14 +674,14 @@ impl<K, V> RawTable<K, V> {
         }
     }
 
-    pub fn mut_iter(&mut self) -> MutEntries<K, V> {
+    pub fn iter_mut(&mut self) -> MutEntries<K, V> {
         MutEntries {
             iter: self.raw_buckets(),
             elems_left: self.size(),
         }
     }
 
-    pub fn move_iter(self) -> MoveEntries<K, V> {
+    pub fn into_iter(self) -> MoveEntries<K, V> {
         MoveEntries {
             iter: self.raw_buckets(),
             table: self,
@@ -846,8 +846,8 @@ impl<K: Clone, V: Clone> Clone for RawTable<K, V> {
                                 (full.hash(), k.clone(), v.clone())
                             };
                             *new_buckets.raw.hash = h.inspect();
-                            mem::overwrite(new_buckets.raw.key, k);
-                            mem::overwrite(new_buckets.raw.val, v);
+                            ptr::write(new_buckets.raw.key, k);
+                            ptr::write(new_buckets.raw.val, v);
                         }
                         Empty(..) => {
                             *new_buckets.raw.hash = EMPTY_BUCKET;
@@ -872,7 +872,7 @@ impl<K, V> Drop for RawTable<K, V> {
             return;
         }
         // This is done in reverse because we've likely partially taken
-        // some elements out with `.move_iter()` from the front.
+        // some elements out with `.into_iter()` from the front.
         // Check if the size is 0, so we don't do a useless scan when
         // dropping empty tables such as on resize.
         // Also avoid double drop of elements that have been already moved out.

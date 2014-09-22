@@ -8,12 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// FIXME: #13994: port to the sized deallocation API when available
 // FIXME: #13996: mark the `allocate` and `reallocate` return value as `noalias`
-//                and `nonnull`
-
-#[cfg(not(test))] use core::raw;
-#[cfg(stage0, not(test))] use util;
 
 /// Returns a pointer to `size` bytes of memory.
 ///
@@ -88,10 +83,11 @@ pub fn stats_print() {
     imp::stats_print();
 }
 
-// The compiler never calls `exchange_free` on Box<ZeroSizeType>, so zero-size
-// allocations can point to this `static`. It would be incorrect to use a null
-// pointer, due to enums assuming types like unique pointers are never null.
-pub static mut EMPTY: uint = 12345;
+/// An arbitrary non-null address to represent zero-size allocations.
+///
+/// This preserves the non-null invariant for types like `Box<T>`. The address may overlap with
+/// non-zero-size memory allocations.
+pub static EMPTY: *mut () = 0x1 as *mut ();
 
 /// The allocator for unique pointers.
 #[cfg(not(test))]
@@ -99,7 +95,7 @@ pub static mut EMPTY: uint = 12345;
 #[inline]
 unsafe fn exchange_malloc(size: uint, align: uint) -> *mut u8 {
     if size == 0 {
-        &EMPTY as *const uint as *mut u8
+        EMPTY as *mut u8
     } else {
         allocate(size, align)
     }
@@ -110,37 +106,6 @@ unsafe fn exchange_malloc(size: uint, align: uint) -> *mut u8 {
 #[inline]
 unsafe fn exchange_free(ptr: *mut u8, size: uint, align: uint) {
     deallocate(ptr, size, align);
-}
-
-// FIXME: #7496
-#[cfg(stage0, not(test))]
-#[lang="closure_exchange_malloc"]
-#[inline]
-#[allow(deprecated)]
-unsafe fn closure_exchange_malloc(drop_glue: fn(*mut u8), size: uint,
-                                  align: uint) -> *mut u8 {
-    let total_size = util::get_box_size(size, align);
-    let p = allocate(total_size, 8);
-
-    let alloc = p as *mut raw::Box<()>;
-    (*alloc).drop_glue = drop_glue;
-
-    alloc as *mut u8
-}
-
-// FIXME: #7496
-#[cfg(not(stage0), not(test))]
-#[lang="closure_exchange_malloc"]
-#[inline]
-#[allow(deprecated)]
-unsafe fn closure_exchange_malloc(drop_glue: fn(*mut u8), size: uint,
-                                  align: uint) -> *mut u8 {
-    let p = allocate(size, align);
-
-    let alloc = p as *mut raw::Box<()>;
-    (*alloc).drop_glue = drop_glue;
-
-    alloc as *mut u8
 }
 
 // The minimum alignment guaranteed by the architecture. This value is used to
@@ -157,7 +122,7 @@ static MIN_ALIGN: uint = 16;
 #[cfg(jemalloc)]
 mod imp {
     use core::option::{None, Option};
-    use core::ptr::{RawPtr, mut_null, null};
+    use core::ptr::{RawPtr, null_mut, null};
     use core::num::Int;
     use libc::{c_char, c_int, c_void, size_t};
     use super::MIN_ALIGN;
@@ -172,9 +137,6 @@ mod imp {
                       flags: c_int) -> *mut c_void;
         fn je_xallocx(ptr: *mut c_void, size: size_t, extra: size_t,
                       flags: c_int) -> size_t;
-        #[cfg(stage0)]
-        fn je_dallocx(ptr: *mut c_void, flags: c_int);
-        #[cfg(not(stage0))]
         fn je_sdallocx(ptr: *mut c_void, size: size_t, flags: c_int);
         fn je_nallocx(size: size_t, flags: c_int) -> size_t;
         fn je_malloc_stats_print(write_cb: Option<extern "C" fn(cbopaque: *mut c_void,
@@ -226,14 +188,6 @@ mod imp {
     }
 
     #[inline]
-    #[cfg(stage0)]
-    pub unsafe fn deallocate(ptr: *mut u8, _size: uint, align: uint) {
-        let flags = align_to_flags(align);
-        je_dallocx(ptr as *mut c_void, flags)
-    }
-
-    #[inline]
-    #[cfg(not(stage0))]
     pub unsafe fn deallocate(ptr: *mut u8, size: uint, align: uint) {
         let flags = align_to_flags(align);
         je_sdallocx(ptr as *mut c_void, size as size_t, flags)
@@ -247,7 +201,7 @@ mod imp {
 
     pub fn stats_print() {
         unsafe {
-            je_malloc_stats_print(None, mut_null(), null())
+            je_malloc_stats_print(None, null_mut(), null())
         }
     }
 }
@@ -255,7 +209,6 @@ mod imp {
 #[cfg(not(jemalloc), unix)]
 mod imp {
     use core::cmp;
-    use core::mem;
     use core::ptr;
     use libc;
     use libc_heap;

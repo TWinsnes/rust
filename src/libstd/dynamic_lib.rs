@@ -260,7 +260,7 @@ pub mod dl {
         dlclose(handle as *mut libc::c_void); ()
     }
 
-    pub enum RTLD {
+    pub enum Rtld {
         Lazy = 1,
         Now = 2,
         Global = 256,
@@ -281,6 +281,7 @@ pub mod dl {
 #[cfg(target_os = "windows")]
 pub mod dl {
     use c_str::ToCStr;
+    use collections::MutableSeq;
     use iter::Iterator;
     use libc;
     use os;
@@ -295,13 +296,13 @@ pub mod dl {
         // Windows expects Unicode data
         let filename_cstr = filename.to_c_str();
         let filename_str = str::from_utf8(filename_cstr.as_bytes_no_nul()).unwrap();
-        let filename_str: Vec<u16> = filename_str.utf16_units().collect();
-        let filename_str = filename_str.append_one(0);
+        let mut filename_str: Vec<u16> = filename_str.utf16_units().collect();
+        filename_str.push(0);
         LoadLibraryW(filename_str.as_ptr() as *const libc::c_void) as *mut u8
     }
 
     pub unsafe fn open_internal() -> *mut u8 {
-        let mut handle = ptr::mut_null();
+        let mut handle = ptr::null_mut();
         GetModuleHandleExW(0 as libc::DWORD, ptr::null(), &mut handle);
         handle as *mut u8
     }

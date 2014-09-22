@@ -177,7 +177,7 @@ pub struct Cache {
     pub extern_locations: HashMap<ast::CrateNum, ExternalLocation>,
 
     /// Cache of where documentation for primitives can be found.
-    pub primitive_locations: HashMap<clean::Primitive, ast::CrateNum>,
+    pub primitive_locations: HashMap<clean::PrimitiveType, ast::CrateNum>,
 
     /// Set of definitions which have been inlined from external crates.
     pub inlined: HashSet<ast::DefId>,
@@ -299,7 +299,7 @@ pub fn run(mut krate: clean::Crate, external_html: &ExternalHtml, dst: Path) -> 
     let paths: HashMap<ast::DefId, (Vec<String>, ItemType)> =
       analysis.as_ref().map(|a| {
         let paths = a.external_paths.borrow_mut().take().unwrap();
-        paths.move_iter().map(|(k, (v, t))| {
+        paths.into_iter().map(|(k, (v, t))| {
             (k, (v, match t {
                 clean::TypeStruct => item_type::Struct,
                 clean::TypeEnum => item_type::Enum,
@@ -308,6 +308,7 @@ pub fn run(mut krate: clean::Crate, external_html: &ExternalHtml, dst: Path) -> 
                 clean::TypeModule => item_type::Module,
                 clean::TypeStatic => item_type::Static,
                 clean::TypeVariant => item_type::Variant,
+                clean::TypeTypedef => item_type::Typedef,
             }))
         }).collect()
     }).unwrap_or(HashMap::new());
@@ -739,8 +740,9 @@ impl<'a> SourceCollector<'a> {
             root_path.push_str("../");
         });
 
-        cur.push(Vec::from_slice(p.filename().expect("source has no filename"))
-                 .append(b".html"));
+        let mut fname = p.filename().expect("source has no filename").to_vec();
+        fname.extend(".html".bytes());
+        cur.push(fname);
         let mut w = BufferedWriter::new(try!(File::create(&cur)));
 
         let title = format!("{} -- source", cur.filename_display());
@@ -950,7 +952,7 @@ impl DocFolder for Cache {
                         use clean::{FixedVector, Slice, Tuple, PrimitiveTuple};
 
                         // extract relevant documentation for this impl
-                        let dox = match attrs.move_iter().find(|a| {
+                        let dox = match attrs.into_iter().find(|a| {
                             match *a {
                                 clean::NameValue(ref x, _)
                                         if "doc" == x.as_slice() => {
@@ -1207,7 +1209,7 @@ impl Context {
                         _ => unreachable!()
                     };
                     this.sidebar = build_sidebar(&m);
-                    for item in m.items.move_iter() {
+                    for item in m.items.into_iter() {
                         f(this,item);
                     }
                     Ok(())
@@ -1511,6 +1513,7 @@ fn item_module(w: &mut fmt::Formatter, cx: &Context,
                 clean::ForeignStaticItem(..)   => ("ffi-statics", "Foreign Statics"),
                 clean::MacroItem(..)           => ("macros", "Macros"),
                 clean::PrimitiveItem(..)       => ("primitives", "Primitive Types"),
+                clean::AssociatedTypeItem(..)  => ("associated-types", "Associated Types"),
             };
             try!(write!(w,
                         "<h2 id='{id}' class='section-header'>\
@@ -1635,7 +1638,7 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                                   _ => false,
                               }
                           })
-                          .collect::<Vec<&clean::TraitItem>>();
+                          .collect::<Vec<&clean::TraitMethod>>();
     let provided = t.items.iter()
                           .filter(|m| {
                               match **m {
@@ -1643,7 +1646,7 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                                   _ => false,
                               }
                           })
-                          .collect::<Vec<&clean::TraitItem>>();
+                          .collect::<Vec<&clean::TraitMethod>>();
 
     if t.items.len() == 0 {
         try!(write!(w, "{{ }}"));
@@ -1669,7 +1672,7 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
     // Trait documentation
     try!(document(w, it));
 
-    fn trait_item(w: &mut fmt::Formatter, m: &clean::TraitItem)
+    fn trait_item(w: &mut fmt::Formatter, m: &clean::TraitMethod)
                   -> fmt::Result {
         try!(write!(w, "<h3 id='{}.{}' class='method'>{}<code>",
                     shortty(m.item()),
@@ -2143,7 +2146,7 @@ fn build_sidebar(m: &clean::Module) -> HashMap<String, Vec<String>> {
         v.push(myname);
     }
 
-    for (_, items) in map.mut_iter() {
+    for (_, items) in map.iter_mut() {
         items.as_mut_slice().sort();
     }
     return map;
@@ -2178,7 +2181,7 @@ fn item_macro(w: &mut fmt::Formatter, it: &clean::Item,
 
 fn item_primitive(w: &mut fmt::Formatter,
                   it: &clean::Item,
-                  _p: &clean::Primitive) -> fmt::Result {
+                  _p: &clean::PrimitiveType) -> fmt::Result {
     try!(document(w, it));
     render_methods(w, it)
 }

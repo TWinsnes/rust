@@ -25,7 +25,7 @@ use llvm;
 use metadata::csearch;
 use middle::def;
 use middle::subst;
-use middle::subst::{Subst, VecPerParamSpace};
+use middle::subst::{Subst};
 use middle::trans::adt;
 use middle::trans::base;
 use middle::trans::base::*;
@@ -47,7 +47,6 @@ use middle::trans::monomorphize;
 use middle::trans::type_::Type;
 use middle::trans::type_of;
 use middle::ty;
-use middle::typeck;
 use middle::typeck::coherence::make_substs_for_receiver_types;
 use middle::typeck::MethodCall;
 use util::ppaux::Repr;
@@ -197,14 +196,12 @@ fn trans<'blk, 'tcx>(bcx: Block<'blk, 'tcx>, expr: &ast::Expr)
                 }
             }
             def::DefStatic(..) |
-            def::DefArg(..) |
             def::DefLocal(..) |
-            def::DefBinding(..) |
             def::DefUpvar(..) => {
                 datum_callee(bcx, ref_expr)
             }
             def::DefMod(..) | def::DefForeignMod(..) | def::DefTrait(..) |
-            def::DefTy(..) | def::DefPrimTy(..) |
+            def::DefTy(..) | def::DefPrimTy(..) | def::DefAssociatedTy(..) |
             def::DefUse(..) | def::DefTyParamBinder(..) |
             def::DefRegion(..) | def::DefLabel(..) | def::DefTyParam(..) |
             def::DefSelfTy(..) | def::DefMethod(..) => {
@@ -227,59 +224,25 @@ pub fn trans_fn_ref(bcx: Block, def_id: ast::DefId, node: ExprOrMethodCall) -> V
     let _icx = push_ctxt("trans_fn_ref");
 
     let substs = node_id_substs(bcx, node);
-    let vtable_key = match node {
-        ExprId(id) => MethodCall::expr(id),
-        MethodCall(method_call) => method_call
-    };
-    let vtables = node_vtables(bcx, vtable_key);
-    debug!("trans_fn_ref(def_id={}, node={:?}, substs={}, vtables={})",
+    debug!("trans_fn_ref(def_id={}, node={:?}, substs={})",
            def_id.repr(bcx.tcx()),
            node,
-           substs.repr(bcx.tcx()),
-           vtables.repr(bcx.tcx()));
-    trans_fn_ref_with_vtables(bcx, def_id, node, substs, vtables)
+           substs.repr(bcx.tcx()));
+    trans_fn_ref_with_substs(bcx, def_id, node, substs)
 }
 
-fn trans_fn_ref_with_vtables_to_callee<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
-                                                   def_id: ast::DefId,
-                                                   ref_id: ast::NodeId,
-                                                   substs: subst::Substs,
-                                                   vtables: typeck::vtable_res)
-                                                   -> Callee<'blk, 'tcx> {
+fn trans_fn_ref_with_substs_to_callee<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
+                                                  def_id: ast::DefId,
+                                                  ref_id: ast::NodeId,
+                                                  substs: subst::Substs)
+                                                  -> Callee<'blk, 'tcx> {
     Callee {
         bcx: bcx,
-        data: Fn(trans_fn_ref_with_vtables(bcx,
-                                           def_id,
-                                           ExprId(ref_id),
-                                           substs,
-                                           vtables)),
+        data: Fn(trans_fn_ref_with_substs(bcx,
+                                          def_id,
+                                          ExprId(ref_id),
+                                          substs)),
     }
-}
-
-fn resolve_default_method_vtables(bcx: Block,
-                                  impl_id: ast::DefId,
-                                  substs: &subst::Substs,
-                                  impl_vtables: typeck::vtable_res)
-                                  -> typeck::vtable_res
-{
-    // Get the vtables that the impl implements the trait at
-    let impl_res = ty::lookup_impl_vtables(bcx.tcx(), impl_id);
-
-    // Build up a param_substs that we are going to resolve the
-    // trait_vtables under.
-    let param_substs = param_substs {
-        substs: (*substs).clone(),
-        vtables: impl_vtables.clone()
-    };
-
-    let mut param_vtables = resolve_vtables_under_param_substs(
-        bcx.tcx(), &param_substs, &impl_res);
-
-    // Now we pull any vtables for parameters on the actual method.
-    param_vtables.push_all(subst::FnSpace,
-                           impl_vtables.get_slice(subst::FnSpace));
-
-    param_vtables
 }
 
 /// Translates the adapter that deconstructs a `Box<Trait>` object into
@@ -408,12 +371,11 @@ pub fn trans_unboxing_shim(bcx: Block,
     llfn
 }
 
-pub fn trans_fn_ref_with_vtables(
+pub fn trans_fn_ref_with_substs(
     bcx: Block,                  //
     def_id: ast::DefId,          // def id of fn
     node: ExprOrMethodCall,      // node id of use of fn; may be zero if N/A
-    substs: subst::Substs,       // values for fn's ty params
-    vtables: typeck::vtable_res) // vtables for the call
+    substs: subst::Substs)       // vtables for the call
     -> ValueRef
 {
     /*!
@@ -428,20 +390,18 @@ pub fn trans_fn_ref_with_vtables(
      *   This parameter may be zero; but, if so, the resulting value may not
      *   have the right type, so it must be cast before being used.
      * - `substs`: values for each of the fn/method's parameters
-     * - `vtables`: values for each bound on each of the type parameters
      */
 
-    let _icx = push_ctxt("trans_fn_ref_with_vtables");
+    let _icx = push_ctxt("trans_fn_ref_with_substs");
     let ccx = bcx.ccx();
     let tcx = bcx.tcx();
 
-    debug!("trans_fn_ref_with_vtables(bcx={}, def_id={}, node={:?}, \
-            substs={}, vtables={})",
+    debug!("trans_fn_ref_with_substs(bcx={}, def_id={}, node={:?}, \
+            substs={})",
            bcx.to_str(),
            def_id.repr(tcx),
            node,
-           substs.repr(tcx),
-           vtables.repr(tcx));
+           substs.repr(tcx));
 
     assert!(substs.types.all(|t| !ty::type_needs_infer(*t)));
 
@@ -456,9 +416,8 @@ pub fn trans_fn_ref_with_vtables(
     // We need to do a bunch of special handling for default methods.
     // We need to modify the def_id and our substs in order to monomorphize
     // the function.
-    let (is_default, def_id, substs, vtables) =
-        match ty::provided_source(tcx, def_id) {
-        None => (false, def_id, substs, vtables),
+    let (is_default, def_id, substs) = match ty::provided_source(tcx, def_id) {
+        None => (false, def_id, substs),
         Some(source_id) => {
             // There are two relevant substitutions when compiling
             // default methods. First, there is the substitution for
@@ -491,23 +450,15 @@ pub fn trans_fn_ref_with_vtables(
 
                     debug!("trans_fn_with_vtables - default method: \
                             substs = {}, trait_subst = {}, \
-                            first_subst = {}, new_subst = {}, \
-                            vtables = {}",
+                            first_subst = {}, new_subst = {}",
                            substs.repr(tcx), trait_ref.substs.repr(tcx),
-                           first_subst.repr(tcx), new_substs.repr(tcx),
-                           vtables.repr(tcx));
+                           first_subst.repr(tcx), new_substs.repr(tcx));
 
-                    let param_vtables =
-                        resolve_default_method_vtables(bcx,
-                                                       impl_id,
-                                                       &substs,
-                                                       vtables);
-
-                    debug!("trans_fn_with_vtables - default method: \
-                            param_vtables = {}",
-                           param_vtables.repr(tcx));
-
-                    (true, source_id, new_substs, param_vtables)
+                    (true, source_id, new_substs)
+                }
+                ty::TypeTraitItem(_) => {
+                    bcx.tcx().sess.bug("trans_fn_ref_with_vtables() tried \
+                                        to translate an associated type?!")
                 }
             }
         }
@@ -556,8 +507,7 @@ pub fn trans_fn_ref_with_vtables(
         };
 
         let (val, must_cast) =
-            monomorphize::monomorphic_fn(ccx, def_id, &substs,
-                                         vtables, opt_ref_id);
+            monomorphize::monomorphic_fn(ccx, def_id, &substs, opt_ref_id);
         let mut val = val;
         if must_cast && node != ExprId(0) {
             // Monotype of the REFERENCE to the function (type params
@@ -678,11 +628,10 @@ pub fn trans_lang_call<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
                              None,
                              fty,
                              |bcx, _| {
-                                trans_fn_ref_with_vtables_to_callee(bcx,
-                                                                    did,
-                                                                    0,
-                                                                    subst::Substs::empty(),
-                                                                    VecPerParamSpace::empty())
+                                trans_fn_ref_with_substs_to_callee(bcx,
+                                                                   did,
+                                                                   0,
+                                                                   subst::Substs::empty())
                              },
                              ArgVals(args),
                              dest)
@@ -909,10 +858,10 @@ pub enum CallArgs<'a> {
     // value.
     ArgVals(&'a [ValueRef]),
 
-    // For overloaded operators: `(lhs, Option(rhs, rhs_id))`. `lhs`
+    // For overloaded operators: `(lhs, Vec(rhs, rhs_id))`. `lhs`
     // is the left-hand-side and `rhs/rhs_id` is the datum/expr-id of
-    // the right-hand-side (if any).
-    ArgOverloadedOp(Datum<Expr>, Option<(Datum<Expr>, ast::NodeId)>),
+    // the right-hand-side arguments (if any).
+    ArgOverloadedOp(Datum<Expr>, Vec<(Datum<Expr>, ast::NodeId)>),
 
     // Supply value of arguments as a list of expressions that must be
     // translated, for overloaded call operators.
@@ -1096,17 +1045,13 @@ pub fn trans_args<'blk, 'tcx>(cx: Block<'blk, 'tcx>,
                                 DontAutorefArg)
             }));
 
-            match rhs {
-                Some((rhs, rhs_id)) => {
-                    assert_eq!(arg_tys.len(), 2);
-
-                    llargs.push(unpack_result!(bcx, {
-                        trans_arg_datum(bcx, *arg_tys.get(1), rhs,
-                                        arg_cleanup_scope,
-                                        DoAutorefArg(rhs_id))
-                    }));
-                }
-                None => assert_eq!(arg_tys.len(), 1)
+            assert_eq!(arg_tys.len(), 1 + rhs.len());
+            for (rhs, rhs_id) in rhs.move_iter() {
+                llargs.push(unpack_result!(bcx, {
+                    trans_arg_datum(bcx, *arg_tys.get(1), rhs,
+                                    arg_cleanup_scope,
+                                    DoAutorefArg(rhs_id))
+                }));
             }
         }
         ArgVals(vs) => {

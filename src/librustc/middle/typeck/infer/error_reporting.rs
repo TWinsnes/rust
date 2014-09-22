@@ -335,7 +335,7 @@ impl<'a, 'tcx> ErrorReporting for InferCtxt<'a, 'tcx> {
                                   same_frs: &FreeRegionsFromSameFn) {
             let scope_id = same_frs.scope_id;
             let (sub_fr, sup_fr) = (same_frs.sub_fr, same_frs.sup_fr);
-            for sr in same_regions.mut_iter() {
+            for sr in same_regions.iter_mut() {
                 if sr.contains(&sup_fr.bound_region)
                    && scope_id == sr.scope_id {
                     sr.push(sub_fr.bound_region);
@@ -363,6 +363,7 @@ impl<'a, 'tcx> ErrorReporting for InferCtxt<'a, 'tcx> {
             infer::ExprAssignable(_) => "mismatched types",
             infer::RelateTraitRefs(_) => "mismatched traits",
             infer::RelateSelfType(_) => "mismatched types",
+            infer::RelateOutputImplTypes(_) => "mismatched types",
             infer::MatchExpressionArm(_, _) => "match arms have incompatible types",
             infer::IfExpression(_) => "if and else have incompatible types",
         };
@@ -870,6 +871,7 @@ impl<'a, 'tcx> ErrorReporting for InferCtxt<'a, 'tcx> {
                                   Some(&m.pe_explicit_self().node),
                                   m.span))
                         }
+                        ast::TypeImplItem(_) => None,
                     }
                 },
                 _ => None
@@ -1234,7 +1236,7 @@ impl<'a, 'tcx> Rebuilder<'a, 'tcx> {
                         Some(&d) => d
                     };
                     match a_def {
-                        def::DefTy(did) | def::DefStruct(did) => {
+                        def::DefTy(did, _) | def::DefStruct(did) => {
                             let generics = ty::lookup_item_type(self.tcx, did).generics;
 
                             let expected =
@@ -1327,7 +1329,7 @@ impl<'a, 'tcx> Rebuilder<'a, 'tcx> {
                         ast::TyFixedLengthVec(build_to(ty, to), e)
                     }
                     ast::TyTup(tys) => {
-                        ast::TyTup(tys.move_iter().map(|ty| build_to(ty, to)).collect())
+                        ast::TyTup(tys.into_iter().map(|ty| build_to(ty, to)).collect())
                     }
                     ast::TyParen(typ) => ast::TyParen(build_to(typ, to)),
                     other => other
@@ -1465,7 +1467,11 @@ impl<'a, 'tcx> ErrorReportingHelpers for InferCtxt<'a, 'tcx> {
                         format!("traits are compatible")
                     }
                     infer::RelateSelfType(_) => {
-                        format!("type matches impl")
+                        format!("self type matches impl self type")
+                    }
+                    infer::RelateOutputImplTypes(_) => {
+                        format!("trait type parameters matches those \
+                                 specified on the impl")
                     }
                     infer::MatchExpressionArm(_, _) => {
                         format!("match arms have compatible types")
@@ -1682,6 +1688,7 @@ fn lifetimes_in_scope(tcx: &ty::ctxt,
                         taken.push_all(m.pe_generics().lifetimes.as_slice());
                         Some(m.id)
                     }
+                    ast::TypeImplItem(_) => None,
                 }
             }
             _ => None

@@ -25,6 +25,7 @@
 //! for all lint attributes.
 
 use middle::privacy::ExportedItems;
+use middle::subst;
 use middle::ty;
 use middle::typeck::astconv::AstConv;
 use middle::typeck::infer;
@@ -183,6 +184,7 @@ impl LintStore {
                      NonSnakeCase,
                      NonUppercaseStatics,
                      UnnecessaryParens,
+                     UnnecessaryImportBraces,
                      UnusedUnsafe,
                      UnsafeBlock,
                      UnusedMut,
@@ -259,7 +261,7 @@ macro_rules! run_lints ( ($cx:expr, $f:ident, $($args:expr),*) => ({
     // Move the vector of passes out of `$cx` so that we can
     // iterate over it mutably while passing `$cx` to the methods.
     let mut passes = $cx.lints.passes.take().unwrap();
-    for obj in passes.mut_iter() {
+    for obj in passes.iter_mut() {
         obj.$f($cx, $($args),*);
     }
     $cx.lints.passes = Some(passes);
@@ -340,7 +342,7 @@ pub fn raw_emit_lint(sess: &Session, lint: &'static Lint,
         _ => sess.bug("impossible level in raw_emit_lint"),
     }
 
-    for span in note.move_iter() {
+    for span in note.into_iter() {
         sess.span_note(span, "lint level defined here");
     }
 }
@@ -411,7 +413,7 @@ impl<'a, 'tcx> Context<'a, 'tcx> {
         // specified closure
         let mut pushed = 0u;
 
-        for result in gather_attrs(attrs).move_iter() {
+        for result in gather_attrs(attrs).into_iter() {
             let v = match result {
                 Err(span) => {
                     self.tcx.sess.span_err(span, "malformed lint attribute");
@@ -438,7 +440,7 @@ impl<'a, 'tcx> Context<'a, 'tcx> {
                 }
             };
 
-            for (lint_id, level, span) in v.move_iter() {
+            for (lint_id, level, span) in v.into_iter() {
                 let now = self.lints.get_level_source(lint_id).val0();
                 if now == Forbid && level != Forbid {
                     let lint_name = lint_id.as_str();
@@ -489,6 +491,26 @@ impl<'a, 'tcx> AstConv<'tcx> for Context<'a, 'tcx>{
 
     fn ty_infer(&self, _span: Span) -> ty::t {
         infer::new_infer_ctxt(self.tcx).next_ty_var()
+    }
+
+    fn associated_types_of_trait_are_valid(&self, _: ty::t, _: ast::DefId)
+                                           -> bool {
+        // FIXME(pcwalton): This is wrong.
+        true
+    }
+
+    fn associated_type_binding(&self,
+                               _: Span,
+                               _: Option<ty::t>,
+                               trait_id: ast::DefId,
+                               associated_type_id: ast::DefId)
+                               -> ty::t {
+        // FIXME(pcwalton): This is wrong.
+        let trait_def = self.get_trait_def(trait_id);
+        let index = ty::associated_type_parameter_index(self.tcx,
+                                                        &*trait_def,
+                                                        associated_type_id);
+        ty::mk_param(self.tcx, subst::TypeSpace, index, associated_type_id)
     }
 }
 
@@ -667,7 +689,7 @@ impl<'a, 'tcx> IdVisitingOperation for Context<'a, 'tcx> {
         match self.tcx.sess.lints.borrow_mut().pop(&id) {
             None => {}
             Some(lints) => {
-                for (lint_id, span, msg) in lints.move_iter() {
+                for (lint_id, span, msg) in lints.into_iter() {
                     self.span_lint(lint_id.lint, span, msg.as_slice())
                 }
             }

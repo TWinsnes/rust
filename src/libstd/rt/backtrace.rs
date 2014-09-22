@@ -485,7 +485,7 @@ mod imp {
                     let bytes = path.as_vec();
                     if bytes.len() < LAST_FILENAME.len() {
                         let i = bytes.iter();
-                        for (slot, val) in LAST_FILENAME.mut_iter().zip(i) {
+                        for (slot, val) in LAST_FILENAME.iter_mut().zip(i) {
                             *slot = *val as libc::c_char;
                         }
                         LAST_FILENAME.as_ptr()
@@ -496,7 +496,7 @@ mod imp {
                 None => ptr::null(),
             };
             STATE = backtrace_create_state(filename, 0, error_cb,
-                                           ptr::mut_null());
+                                           ptr::null_mut());
             return STATE
         }
 
@@ -831,9 +831,11 @@ mod imp {
     mod arch {
         use libc::{c_longlong, c_ulonglong};
         use libc::types::os::arch::extra::{WORD, DWORD, DWORDLONG};
+        use simd;
 
         #[repr(C)]
         pub struct CONTEXT {
+            _align_hack: [simd::u64x2, ..0], // FIXME align on 16-byte
             P1Home: DWORDLONG,
             P2Home: DWORDLONG,
             P3Home: DWORDLONG,
@@ -892,12 +894,14 @@ mod imp {
 
         #[repr(C)]
         pub struct M128A {
+            _align_hack: [simd::u64x2, ..0], // FIXME align on 16-byte
             Low:  c_ulonglong,
             High: c_longlong
         }
 
         #[repr(C)]
         pub struct FLOATING_SAVE_AREA {
+            _align_hack: [simd::u64x2, ..0], // FIXME align on 16-byte
             _Dummy: [u8, ..512] // FIXME: Fill this out
         }
 

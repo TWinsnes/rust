@@ -57,7 +57,6 @@ a guide that can help you out:
 * [Strings](guide-strings.html)
 * [Pointers](guide-pointers.html)
 * [References and Lifetimes](guide-lifetimes.html)
-* [Containers and Iterators](guide-container.html)
 * [Tasks and Communication](guide-tasks.html)
 * [Foreign Function Interface](guide-ffi.html)
 * [Writing Unsafe and Low-Level Code](guide-unsafe.html)
@@ -87,10 +86,10 @@ There are questions that are asked quite often, and so we've made FAQs for them:
 
 # The standard library
 
-You can find function-level documentation for the entire standard library
-[here](std/index.html). There's a list of crates on the left with more specific
-sections, or you can use the search bar at the top to search for something if
-you know its name.
+We have [API documentation for the entire standard
+library](std/index.html). There's a list of crates on the left with more
+specific sections, or you can use the search bar at the top to search for
+something if you know its name.
 
 # External documentation
 

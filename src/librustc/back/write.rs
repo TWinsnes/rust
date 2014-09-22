@@ -11,11 +11,11 @@
 use back::lto;
 use back::link::{get_cc_prog, remove};
 use driver::driver::{CrateTranslation, ModuleTranslation, OutputFilenames};
-use driver::config::NoDebugInfo;
+use driver::config::{NoDebugInfo, Passes, SomePasses, AllPasses};
 use driver::session::Session;
 use driver::config;
 use llvm;
-use llvm::{ModuleRef, TargetMachineRef, PassManagerRef};
+use llvm::{ModuleRef, TargetMachineRef, PassManagerRef, DiagnosticInfoRef, ContextRef};
 use util::common::time;
 use syntax::abi;
 use syntax::codemap;
@@ -28,9 +28,10 @@ use std::io::fs;
 use std::iter::Unfold;
 use std::ptr;
 use std::str;
+use std::mem;
 use std::sync::{Arc, Mutex};
 use std::task::TaskBuilder;
-use libc::{c_uint, c_int};
+use libc::{c_uint, c_int, c_void};
 
 
 #[deriving(Clone, PartialEq, PartialOrd, Ord, Eq)]
@@ -311,21 +312,49 @@ struct CodegenContext<'a> {
     lto_ctxt: Option<(&'a Session, &'a [String])>,
     // Handler to use for diagnostics produced during codegen.
     handler: &'a Handler,
+    // LLVM optimizations for which we want to print remarks.
+    remark: Passes,
 }
 
 impl<'a> CodegenContext<'a> {
-    fn new(handler: &'a Handler) -> CodegenContext<'a> {
-        CodegenContext {
-            lto_ctxt: None,
-            handler: handler,
-        }
-    }
-
     fn new_with_session(sess: &'a Session, reachable: &'a [String]) -> CodegenContext<'a> {
         CodegenContext {
             lto_ctxt: Some((sess, reachable)),
             handler: sess.diagnostic().handler(),
+            remark: sess.opts.cg.remark.clone(),
         }
+    }
+}
+
+struct DiagHandlerFreeVars<'a> {
+    llcx: ContextRef,
+    cgcx: &'a CodegenContext<'a>,
+}
+
+unsafe extern "C" fn diagnostic_handler(info: DiagnosticInfoRef, user: *mut c_void) {
+    let DiagHandlerFreeVars { llcx, cgcx }
+        = *mem::transmute::<_, *const DiagHandlerFreeVars>(user);
+
+    match llvm::diagnostic::Diagnostic::unpack(info) {
+        llvm::diagnostic::Optimization(opt) => {
+            let pass_name = CString::new(opt.pass_name, false);
+            let pass_name = pass_name.as_str().expect("got a non-UTF8 pass name from LLVM");
+            let enabled = match cgcx.remark {
+                AllPasses => true,
+                SomePasses(ref v) => v.iter().any(|s| s.as_slice() == pass_name),
+            };
+
+            if enabled {
+                let loc = llvm::debug_loc_to_string(llcx, opt.debug_loc);
+                cgcx.handler.note(format!("optimization {:s} for {:s} at {:s}: {:s}",
+                                          opt.kind.describe(),
+                                          pass_name,
+                                          if loc.is_empty() { "[unknown]" } else { loc.as_slice() },
+                                          llvm::twine_to_string(opt.message)).as_slice());
+            }
+        }
+
+        _ => (),
     }
 }
 
@@ -337,6 +366,17 @@ unsafe fn optimize_and_codegen(cgcx: &CodegenContext,
                                output_names: OutputFilenames) {
     let ModuleTranslation { llmod, llcx } = mtrans;
     let tm = config.tm;
+
+    // llcx doesn't outlive this function, so we can put this on the stack.
+    let fv = DiagHandlerFreeVars {
+        llcx: llcx,
+        cgcx: cgcx,
+    };
+    if !cgcx.remark.is_empty() {
+        llvm::LLVMContextSetDiagnosticHandler(llcx, diagnostic_handler,
+                                              &fv as *const DiagHandlerFreeVars
+                                                  as *mut c_void);
+    }
 
     if config.emit_no_opt_bc {
         let ext = format!("{}.no-opt.bc", name_extra);
@@ -442,14 +482,14 @@ unsafe fn optimize_and_codegen(cgcx: &CodegenContext,
         if config.emit_asm {
             let path = output_names.with_extension(format!("{}.s", name_extra).as_slice());
             with_codegen(tm, llmod, config.no_builtins, |cpm| {
-                write_output_file(cgcx.handler, tm, cpm, llmod, &path, llvm::AssemblyFile);
+                write_output_file(cgcx.handler, tm, cpm, llmod, &path, llvm::AssemblyFileType);
             });
         }
 
         if config.emit_obj {
             let path = output_names.with_extension(format!("{}.o", name_extra).as_slice());
             with_codegen(tm, llmod, config.no_builtins, |cpm| {
-                write_output_file(cgcx.handler, tm, cpm, llmod, &path, llvm::ObjectFile);
+                write_output_file(cgcx.handler, tm, cpm, llmod, &path, llvm::ObjectFileType);
             });
         }
     });
@@ -500,13 +540,12 @@ pub fn run_passes(sess: &Session,
         metadata_config.emit_bc = true;
     }
 
-    // Emit a bitcode file for the crate if we're emitting an rlib.
+    // Emit bitcode files for the crate if we're emitting an rlib.
     // Whenever an rlib is created, the bitcode is inserted into the
     // archive in order to allow LTO against it.
     let needs_crate_bitcode =
             sess.crate_types.borrow().contains(&config::CrateTypeRlib) &&
-            sess.opts.output_types.contains(&OutputTypeExe) &&
-            sess.opts.cg.codegen_units == 1;
+            sess.opts.output_types.contains(&OutputTypeExe);
     if needs_crate_bitcode {
         modules_config.emit_bc = true;
     }
@@ -562,19 +601,8 @@ pub fn run_passes(sess: &Session,
     // Process the work items, optionally using worker threads.
     if sess.opts.cg.codegen_units == 1 {
         run_work_singlethreaded(sess, trans.reachable.as_slice(), work_items);
-
-        if needs_crate_bitcode {
-            // The only bitcode file produced (aside from metadata) was
-            // "crate.0.bc".  Rename to "crate.bc" since that's what
-            // `link_rlib` expects to find.
-            fs::copy(&crate_output.with_extension("0.bc"),
-                     &crate_output.temp_path(OutputTypeBitcode)).unwrap();
-        }
     } else {
         run_work_multithreaded(sess, work_items, sess.opts.cg.codegen_units);
-
-        assert!(!needs_crate_bitcode,
-               "can't produce a crate bitcode file from multiple compilation units");
     }
 
     // All codegen is finished.
@@ -584,14 +612,14 @@ pub fn run_passes(sess: &Session,
 
     // Produce final compile outputs.
 
-    let copy_if_one_unit = |ext: &str, output_type: OutputType| {
+    let copy_if_one_unit = |ext: &str, output_type: OutputType, keep_numbered: bool| {
         // Three cases:
         if sess.opts.cg.codegen_units == 1 {
             // 1) Only one codegen unit.  In this case it's no difficulty
             //    to copy `foo.0.x` to `foo.x`.
             fs::copy(&crate_output.with_extension(ext),
                      &crate_output.path(output_type)).unwrap();
-            if !sess.opts.cg.save_temps {
+            if !sess.opts.cg.save_temps && !keep_numbered {
                 // The user just wants `foo.x`, not `foo.0.x`.
                 remove(sess, &crate_output.with_extension(ext));
             }
@@ -676,17 +704,18 @@ pub fn run_passes(sess: &Session,
     // Flag to indicate whether the user explicitly requested bitcode.
     // Otherwise, we produced it only as a temporary output, and will need
     // to get rid of it.
-    // FIXME: Since we don't support LTO anyway, maybe we can avoid
-    // producing the temporary .0.bc's in the first place?
-    let mut save_bitcode = false;
+    let mut user_wants_bitcode = false;
     for output_type in output_types.iter() {
         match *output_type {
             OutputTypeBitcode => {
-                save_bitcode = true;
-                copy_if_one_unit("0.bc", OutputTypeBitcode);
+                user_wants_bitcode = true;
+                // Copy to .bc, but always keep the .0.bc.  There is a later
+                // check to figure out if we should delete .0.bc files, or keep
+                // them for making an rlib.
+                copy_if_one_unit("0.bc", OutputTypeBitcode, true);
             },
-            OutputTypeLlvmAssembly => { copy_if_one_unit("0.ll", OutputTypeLlvmAssembly); },
-            OutputTypeAssembly => { copy_if_one_unit("0.s", OutputTypeAssembly); },
+            OutputTypeLlvmAssembly => { copy_if_one_unit("0.ll", OutputTypeLlvmAssembly, false); },
+            OutputTypeAssembly => { copy_if_one_unit("0.s", OutputTypeAssembly, false); },
             OutputTypeObject => { link_obj(&crate_output.path(OutputTypeObject)); },
             OutputTypeExe => {
                 // If OutputTypeObject is already in the list, then
@@ -699,7 +728,7 @@ pub fn run_passes(sess: &Session,
             },
         }
     }
-    let save_bitcode = save_bitcode;
+    let user_wants_bitcode = user_wants_bitcode;
 
     // Clean up unwanted temporary files.
 
@@ -715,22 +744,36 @@ pub fn run_passes(sess: &Session,
 
     if !sess.opts.cg.save_temps {
         // Remove the temporary .0.o objects.  If the user didn't
-        // explicitly request bitcode (with --emit=bc), we must remove
-        // .0.bc as well.  (We don't touch the crate.bc that may have been
-        // produced earlier.)
+        // explicitly request bitcode (with --emit=bc), and the bitcode is not
+        // needed for building an rlib, then we must remove .0.bc as well.
+
+        // Specific rules for keeping .0.bc:
+        //  - If we're building an rlib (`needs_crate_bitcode`), then keep
+        //    it.
+        //  - If the user requested bitcode (`user_wants_bitcode`), and
+        //    codegen_units > 1, then keep it.
+        //  - If the user requested bitcode but codegen_units == 1, then we
+        //    can toss .0.bc because we copied it to .bc earlier.
+        //  - If we're not building an rlib and the user didn't request
+        //    bitcode, then delete .0.bc.
+        // If you change how this works, also update back::link::link_rlib,
+        // where .0.bc files are (maybe) deleted after making an rlib.
+        let keep_numbered_bitcode = needs_crate_bitcode ||
+                (user_wants_bitcode && sess.opts.cg.codegen_units > 1);
+
         for i in range(0, trans.modules.len()) {
             if modules_config.emit_obj {
                 let ext = format!("{}.o", i);
                 remove(sess, &crate_output.with_extension(ext.as_slice()));
             }
 
-            if modules_config.emit_bc && !save_bitcode {
+            if modules_config.emit_bc && !keep_numbered_bitcode {
                 let ext = format!("{}.bc", i);
                 remove(sess, &crate_output.with_extension(ext.as_slice()));
             }
         }
 
-        if metadata_config.emit_bc && !save_bitcode {
+        if metadata_config.emit_bc && !user_wants_bitcode {
             remove(sess, &crate_output.with_extension("metadata.bc"));
         }
     }
@@ -785,13 +828,18 @@ fn run_work_multithreaded(sess: &Session,
     for i in range(0, num_workers) {
         let work_items_arc = work_items_arc.clone();
         let diag_emitter = diag_emitter.clone();
+        let remark = sess.opts.cg.remark.clone();
 
         let future = TaskBuilder::new().named(format!("codegen-{}", i)).try_future(proc() {
             let diag_handler = mk_handler(box diag_emitter);
 
             // Must construct cgcx inside the proc because it has non-Send
             // fields.
-            let cgcx = CodegenContext::new(&diag_handler);
+            let cgcx = CodegenContext {
+                lto_ctxt: None,
+                handler: &diag_handler,
+                remark: remark,
+            };
 
             loop {
                 // Avoid holding the lock for the entire duration of the match.
@@ -812,7 +860,7 @@ fn run_work_multithreaded(sess: &Session,
     }
 
     let mut failed = false;
-    for future in futures.move_iter() {
+    for future in futures.into_iter() {
         match future.unwrap() {
             Ok(()) => {},
             Err(_) => {

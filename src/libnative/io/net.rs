@@ -37,7 +37,7 @@ pub fn ntohs(u: u16) -> u16 {
 }
 
 enum InAddr {
-    InAddr(libc::in_addr),
+    In4Addr(libc::in_addr),
     In6Addr(libc::in6_addr),
 }
 
@@ -48,7 +48,7 @@ fn ip_to_inaddr(ip: rtio::IpAddr) -> InAddr {
                      (b as u32 << 16) |
                      (c as u32 <<  8) |
                      (d as u32 <<  0);
-            InAddr(libc::in_addr {
+            In4Addr(libc::in_addr {
                 s_addr: Int::from_be(ip)
             })
         }
@@ -74,7 +74,7 @@ fn addr_to_sockaddr(addr: rtio::SocketAddr,
                     -> libc::socklen_t {
     unsafe {
         let len = match ip_to_inaddr(addr.ip) {
-            InAddr(inaddr) => {
+            In4Addr(inaddr) => {
                 let storage = storage as *mut _ as *mut libc::sockaddr_in;
                 (*storage).sin_family = libc::AF_INET as libc::sa_family_t;
                 (*storage).sin_port = htons(addr.port);
@@ -543,7 +543,7 @@ impl TcpAcceptor {
 
         while !self.inner.closed.load(atomic::SeqCst) {
             match retry(|| unsafe {
-                libc::accept(self.fd(), ptr::mut_null(), ptr::mut_null())
+                libc::accept(self.fd(), ptr::null_mut(), ptr::null_mut())
             }) {
                 -1 if util::wouldblock() => {}
                 -1 => return Err(os::last_error()),
@@ -608,7 +608,7 @@ impl TcpAcceptor {
 
             if wsaevents.lNetworkEvents & c::FD_ACCEPT == 0 { continue }
             match unsafe {
-                libc::accept(self.fd(), ptr::mut_null(), ptr::mut_null())
+                libc::accept(self.fd(), ptr::null_mut(), ptr::null_mut())
             } {
                 -1 if util::wouldblock() => {}
                 -1 => return Err(os::last_error()),
@@ -723,7 +723,7 @@ impl UdpSocket {
     pub fn set_membership(&mut self, addr: rtio::IpAddr,
                           opt: libc::c_int) -> IoResult<()> {
         match ip_to_inaddr(addr) {
-            InAddr(addr) => {
+            In4Addr(addr) => {
                 let mreq = libc::ip_mreq {
                     imr_multiaddr: addr,
                     // interface == INADDR_ANY
